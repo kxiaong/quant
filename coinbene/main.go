@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -17,6 +18,9 @@ type CommandStruct struct {
 	Args []string `json:"args"`
 }
 
+type DataResponse struct {
+}
+
 //wss://ws.coinbene.com/stream/ws
 func main() {
 	flag.Parse()
@@ -26,40 +30,26 @@ func main() {
 	signal.Notify(interrupt, os.Interrupt)
 
 	u := url.URL{Scheme: "wss", Host: *addr, Path: "/stream/ws"}
-	log.Printf("connecting to %s", u.String())
-	dailer := websocket.Dialer{}
+	dailer := websocket.Dialer{Proxy: http.ProxyFromEnvironment}
 
-	c, _, err := dailer.Dial(u.String(), nil)
-	if err != nil {
-		log.Fatal("dial: ", err)
-		return
-	}
+	c, _, _ := dailer.Dial(u.String(), nil)
 	defer c.Close()
 	msg := CommandStruct{
 		Op:   "subscribe",
-		Args: []string{"usdt/ticker.BTC-SWAP", "usdt/orderBook.BTC-SWAP.10", "usdt/tradeList.BTC-SWAP"},
+		Args: []string{"usdt/kline.ETH-SWAP", "usdt/ticker.ETH-SWAP", "usdt/orderBook.ETH-SWAP.100", "usdt/tradeList.ETH-SWAP"},
 	}
-	err = c.WriteJSON(msg)
-	if err != nil {
-		log.Printf("write json: %v", err)
-		return
-	}
+	c.WriteJSON(msg)
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for {
-			log.Println("waiting for new message...")
-			_, message, err := c.ReadMessage()
-			if err != nil {
-				log.Println("read:", err)
-				return
-			}
+			_, message, _ := c.ReadMessage()
+
 			log.Printf("recv: %s", message)
 			if string(message) == "ping" {
 				pong := []byte("pong")
-				c.WriteMessage(len(pong), pong)
-				log.Println("pong")
+				c.WriteMessage(websocket.TextMessage, pong)
 			}
 		}
 	}()
