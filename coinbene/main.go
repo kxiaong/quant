@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -11,22 +12,11 @@ import (
 	"strconv"
 
 	"github.com/gorilla/websocket"
+	"github.com/kxiaong/quant/util"
 )
 
 // []string{"usdt/kline.BTC-SWAP", "usdt/ticker.BTC-SWAP", "usdt/orderBook.BTC-SWAP", "usdt/tradeList.BTC-SWAP"},
 // []string{"usdt/kline.BTC-SWAP.1m" "usdt/kline.BTC-SWAP.5m" "usdt/kline.BTC-SWAP.15m" "usdt/kline.BTC-SWAP.30m" "usdt/kline.BTC-SWAP.1h"}
-
-var logger = GetLogger()
-
-func GetLogger() *log.Logger {
-	f, err := os.OpenFile("coinbene.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		log.Println(err)
-	}
-	defer f.Close()
-	logger := log.New(f, "coinbene: ", log.LstdFlags)
-	return logger
-}
 
 type CommandStruct struct {
 	Op   string   `json:"op"`
@@ -88,10 +78,13 @@ func main() {
 	flag.Parse()
 	log.SetFlags(0)
 
+	logger := util.GetLogger()
+	logger.Println("starting...")
 	var addr = flag.String("addr", "ws.coinbene.com", "websocket server address")
 
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
+	fmt.Println("begin......")
 
 	u := url.URL{Scheme: "wss", Host: *addr, Path: "/stream/ws"}
 	dailer := websocket.Dialer{Proxy: http.ProxyFromEnvironment}
@@ -102,7 +95,13 @@ func main() {
 		Op:   "subscribe",
 		Args: []string{"usdt/orderBook.BTC-SWAP"},
 	}
-	c.WriteJSON(msg)
+
+	fmt.Println("subscribe...")
+	err := c.WriteJSON(msg)
+	if err != nil {
+		fmt.Printf("subscribe failed: %w", err)
+		return
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -110,10 +109,11 @@ func main() {
 		for {
 			_, message, err := c.ReadMessage()
 			if err != nil {
-				logger.Fatal(err)
+				fmt.Println(err)
 				continue
 			}
 
+			fmt.Println("begion to process message...")
 			if string(message) == "ping" {
 				pong := []byte("pong")
 				c.WriteMessage(websocket.TextMessage, pong)
@@ -135,40 +135,45 @@ func main() {
 }
 
 func dispatch(message []byte) {
-	logger.Printf("dispatch: %s", message)
+	fmt.Println("begin to process order book...")
 	respBrief := ResponseBrief{}
 	err := json.Unmarshal(message, &respBrief)
 	if err != nil {
-		logger.Fatal(err)
+		fmt.Printf("unmarshal resp brief failed: %w", err)
+		return
 	}
 
 	if respBrief.Topic == "usdt/orderBook.BTC-SWAP" {
+		fmt.Println("process Order book")
 		processOrderBook(message)
 	} else if respBrief.Topic == "usdt/kline.BTC-SWAP.1m" {
+		fmt.Println("process kline")
 		return
 	} else {
+		fmt.Println("no match, return")
 		return
 	}
 }
 
 func processOrderBook(message []byte) error {
-	logger.Println("process OrderBook")
+	fmt.Println("in processing of order book...")
 	d := OrderBookResponse{}
 	err := json.Unmarshal(message, &d)
 	if err != nil {
-		logger.Fatal(err)
+		fmt.Printf("unmarshal order book failed: %w", err)
+		return err
 	}
 
 	for _, e := range d.Data {
-		logger.Println(e.Version)
-		logger.Println(e.Timestamp)
-		logger.Println("bids ===>")
+		fmt.Println(e.Version)
+		fmt.Println(e.Timestamp)
+		fmt.Println("bids ===>")
 		for _, b := range e.Bids {
-			logger.Println(b)
+			fmt.Println(b)
 		}
-		logger.Println("asks ===>")
+		fmt.Println("asks ===>")
 		for _, a := range e.Asks {
-			logger.Println(a)
+			fmt.Println(a)
 		}
 	}
 	return nil
