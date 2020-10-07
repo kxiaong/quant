@@ -11,20 +11,20 @@ type logger struct {
 	*log.Logger
 }
 
-var logger *logger
+var l *logger
 var once sync.Once
 
 func GetLogger() *logger {
 	once.Do(func() {
-		logger = createLogger("coinbene.log")
+		l = createLogger("coinbene.log")
 	})
-	return logger
+	return l
 }
 
 func createLogger(fname string) *logger {
 	file, _ := os.OpenFile(fname, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
 	return &logger{
 		filename: fname,
-		Logger:   log.New(file, "My app name", log.Lshortfile),
+		Logger:   log.New(file, "coinbene:", log.Lshortfile),
 	}
 }
