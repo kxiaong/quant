@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-pg/pg"
@@ -59,11 +60,6 @@ type EventResponse struct {
 	Code  int    `json:"code,omitempty"`
 }
 
-type Order struct {
-	Price  float64
-	Amount float64
-}
-
 type KlineElem struct {
 	KOpen   float64 `json:"o"`
 	KClose  float64 `json:"c"`
@@ -79,6 +75,57 @@ type KlineResponse struct {
 	Data   []KlineElem `json:"data"`
 }
 
+type TradeElem struct {
+	Price     float64
+	Direction string
+	Amount    int64
+	Ts        time.Time
+}
+
+func (t *TradeElem) UnmarshalJSON(d []byte) error {
+	data := string(d)
+	data = data[1 : len(data)-1]
+	raw := strings.Split(data, ",")
+	if len(raw) < 4 {
+		return fmt.Errorf("trade element length < 4")
+	}
+
+	var p float64
+	p, err := strconv.ParseFloat(strings.Trim(raw[0], "\""), 64)
+	if err != nil {
+		return err
+	}
+	t.Price = p
+
+	_direction := strings.Trim(raw[1], "\"")
+	if _direction == "b" {
+		t.Direction = "buy"
+	} else if _direction == "s" {
+		t.Direction = "sell"
+	} else {
+		return fmt.Errorf("unknown Direction: %s", _direction)
+	}
+
+	var a int64
+	if a, err = strconv.ParseInt(strings.Trim(raw[2], "\""), 10, 64); err != nil {
+		return err
+	}
+	t.Amount = a
+
+	var ts int64
+	if ts, err = strconv.ParseInt(raw[3], 10, 64); err != nil {
+		return err
+	}
+	t.Ts = time.Unix(0, ts*int64(time.Millisecond))
+	return nil
+}
+
+type TradeListResponse struct {
+	Topic  string      `json:"topic"`
+	Action string      `json:"action"`
+	Data   []TradeElem `json:"data"`
+}
+
 type AssetInfo struct {
 	Asset            string  `json:"asset"`
 	AvailableBalance float64 `json:"availableBalance"`
@@ -90,6 +137,11 @@ type AssetInfo struct {
 type AccountInfo struct {
 	Topic     string      `json:"topic"`
 	AssetList []AssetInfo `json:"data"`
+}
+
+type Order struct {
+	Price  float64
+	Amount float64
 }
 
 func (o *Order) UnmarshalJSON(d []byte) error {
@@ -146,7 +198,7 @@ func main() {
 	msg := CommandStruct{
 		Op: "subscribe",
 		Args: []string{
-			"usdt/kline.BTC-SWAP.1h",
+			//"usdt/kline.BTC-SWAP.1h",
 			"usdt/kline.BTC-SWAP.1m",
 			"usdt/ticker.BTC-SWAP",
 			"usdt/orderBook.BTC-SWAP.100",
@@ -212,14 +264,6 @@ func dispatch(message []byte) {
 		if err := processKline(message, "1m"); err != nil {
 			logger.Fatal(err)
 		}
-	case "usdt/kline.BTC-SWAP.1h":
-		if err := processKline(message, "1h"); err != nil {
-			logger.Fatal(err)
-		}
-	case "usdt/ticker.BTC-SWAP":
-		if err := processTicker(message); err != nil {
-			logger.Fatal(err)
-		}
 	case "usdt/tradeList.BTC-SWAP":
 		if err := processTradeList(message); err != nil {
 			logger.Fatal(err)
@@ -231,6 +275,37 @@ func dispatch(message []byte) {
 
 func processTradeList(message []byte) error {
 	logger.Println(string(message))
+	tradeList := TradeListResponse{}
+	if err := json.Unmarshal(message, &tradeList); err != nil {
+		return err
+	}
+
+	var tlist []*model.TradeList
+	for _, e := range tradeList.Data {
+		tmp := &model.TradeList{
+			Price:     e.Price,
+			Direction: e.Direction,
+			Amount:    e.Amount,
+			Ts:        e.Ts,
+		}
+		tlist = append(tlist, tmp)
+	}
+
+	for _, t := range tlist {
+		if err := InsertTradeList(t); err != nil {
+			logger.Fatal(err)
+		}
+	}
+
+	return nil
+}
+
+func InsertTradeList(trade *model.TradeList) error {
+	trade.CreatedAt = time.Now()
+	trade.UpdatedAt = time.Now()
+	if _, err := dbconn.Model(trade).Insert(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -240,7 +315,6 @@ func processTicker(message []byte) error {
 }
 
 func processOrderBook(message []byte) error {
-	logger.Println(string(message))
 	d := OrderBookResponse{}
 	err := json.Unmarshal(message, &d)
 	if err != nil {
@@ -248,20 +322,105 @@ func processOrderBook(message []byte) error {
 		return err
 	}
 
-	/*
-	 *    for _, e := range d.Data {
-	 *        logger.Println(e.Version)
-	 *        logger.Println(e.Timestamp)
-	 *        logger.Println("bids ===>")
-	 *        for _, b := range e.Bids {
-	 *            logger.Println(b)
-	 *        }
-	 *        logger.Println("asks ===>")
-	 *        for _, a := range e.Asks {
-	 *            logger.Println(a)
-	 *        }
-	 *    }
-	 */
+	if d.Action == "insert" {
+		BuildOrderBook(&d)
+	} else {
+		err := UpdateOrderBook(&d)
+		if err != nil {
+			logger.Fatal(err)
+		}
+	}
+
+	return nil
+}
+
+func UpdateOrderBook(orderBook *OrderBookResponse) error {
+	for _, orderVersion := range orderBook.Data {
+		version := orderVersion.Version
+		askData := orderVersion.Asks
+		bidData := orderVersion.Bids
+		for _, ask := range askData {
+			key := fmt.Sprintf("coinbene:btc:sell:%f", ask.Price)
+			_, err := rclient.Get(key).Result()
+			if err == redis.Nil {
+				if ask.Amount != 0 {
+					if _, err := rclient.Set(key, ask.Amount, time.Duration(10*5*time.Second)).Result(); err != nil {
+						return err
+					}
+				} else {
+					continue
+				}
+			} else if err != nil {
+				return err
+			}
+			if ask.Amount != 0 {
+				rclient.Set(key, ask.Amount, time.Duration(10*5*time.Second)).Result()
+			}
+		}
+
+		for _, bid := range bidData {
+			key := fmt.Sprintf("coinbene:btc:buy:%f", bid.Price)
+			_, err := rclient.Get(key).Result()
+			if err == redis.Nil {
+				if bid.Amount == 0 {
+					continue
+				}
+				if _, err := rclient.Set(key, bid.Amount, time.Duration(10*5*time.Second)).Result(); err != nil {
+					return err
+				}
+			} else if err != nil {
+				return err
+			}
+			if bid.Amount == 0 {
+				continue
+			}
+			rclient.Set(key, bid.Amount, time.Duration(10*5*time.Second)).Result()
+		}
+		rclient.Set("coinbene:btc:latest:version", version, time.Duration(10*5*time.Second))
+	}
+	return nil
+}
+
+func BuildOrderBook(orderBook *OrderBookResponse) error {
+	// pattern coinbene:<currnecy>:<side>:<price>
+	oldKeys, err := rclient.Keys("coinbene:btc:*:*").Result()
+	if err != nil {
+		return err
+	}
+
+	for _, k := range oldKeys {
+		rclient.Del(k)
+	}
+	rclient.Del("coinbene:btc:latest:version")
+
+	for _, orderVersion := range orderBook.Data {
+		version := orderVersion.Version
+		askData := orderVersion.Asks
+		bidData := orderVersion.Bids
+		for _, ask := range askData {
+			if ask.Amount == 0 {
+				continue
+			}
+			key := fmt.Sprintf("coinbene:btc:sell:%f", ask.Price)
+			if _, err := rclient.Set(key, ask.Amount, time.Duration(10*60*time.Second)).Result(); err != nil {
+				return err
+			}
+		}
+
+		for _, bid := range bidData {
+			if bid.Amount == 0 {
+				continue
+			}
+			key := fmt.Sprintf("coinbene:btc:buy:%f", bid.Price)
+			if _, err := rclient.Set(key, bid.Amount, time.Duration(10*60*time.Second)).Result(); err != nil {
+				return err
+			}
+		}
+		if _, err := rclient.Set("coinbene:btc:latest:version", version, time.Duration(10*60*time.Second)).Result(); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
