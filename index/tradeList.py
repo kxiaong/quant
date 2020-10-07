@@ -53,16 +53,31 @@ def calculate_current_income(trade_records, ticker):
     print(f"seller income: {seller_income}, seller avg income: {seller_income/seller_count}")
     return seller_income, seller_count, buyser_income, buyser_count
 
+def calculate_30s_trade(conn):
+    cursor = conn.cursor()
+    since = datetime.utcnow() - timedelta(seconds=30)
+    since = since.strftime("%Y-%m-%d %H:%M:%S")
+    sql = f"SELECT direction, sum(amount) FROM coinbene_trade_list where ts >='{since}' group by direction;"
+    print(sql)
+    cursor.execute(sql)
+    result = cursor.fetchall()
+    print(result)
+
 
 if __name__ == "__main__":
     while True:
         conn = connect_db()
         rdconn = connect_redis()
+
+        calculate_30s_trade(conn)
+
         ticker = get_latest_ticker(rdconn)
         records = get_trade_records(conn)
         seller_income, seller_count, buyser_income, buyser_count = calculate_current_income(records, ticker)
         seller_avg_income = seller_income / seller_count
         buyser_avg_income = buyser_income / buyser_count
+
+
 
         diff = abs(seller_avg_income - buyser_avg_income)
         if diff > 50:
