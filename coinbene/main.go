@@ -180,6 +180,25 @@ type OrderBookResponse struct {
 	Data   []OrderBookData `json:"data"`
 }
 
+type Ticker struct {
+	Symbol        string `json:"symbol"`
+	LastPrice     string `json:"lastPrice"`
+	MarkPrice     string `json:"markPrice"`
+	BestAskPrice  string `json:"bestAskPrice"`
+	BestBidPrice  string `json:"bestBidPrice"`
+	BestAskVolume string `json:"bestAskVolume"`
+	BestBidVolume string `json:"bestBidVolume"`
+	High24h       string `json:"high24h"`
+	Low24h        string `json:"low24h"`
+	Volume24h     string `json:"volume24h"`
+	Timestamp     int64  `json:"timestamp"`
+}
+
+type TickerResponse struct {
+	Topic string   `json:"topic"`
+	Data  []Ticker `json:"data"`
+}
+
 func main() {
 	flag.Parse()
 
@@ -197,12 +216,8 @@ func main() {
 
 	msg := CommandStruct{
 		Op: "subscribe",
-		Args: []string{
-			//"usdt/kline.BTC-SWAP.1h",
-			"usdt/kline.BTC-SWAP.1m",
-			"usdt/ticker.BTC-SWAP",
-			"usdt/orderBook.BTC-SWAP.100",
-			"usdt/tradeList.BTC-SWAP",
+		Args: []string{"usdt/kline.BTC-SWAP.1m", "usdt/ticker.BTC-SWAP",
+			"usdt/orderBook.BTC-SWAP.100", "usdt/tradeList.BTC-SWAP",
 		},
 	}
 
@@ -268,6 +283,10 @@ func dispatch(message []byte) {
 		if err := processTradeList(message); err != nil {
 			logger.Fatal(err)
 		}
+	case "usdt/ticker.BTC-SWAP":
+		if err := processTicker(message); err != nil {
+			logger.Fatal(err)
+		}
 	default:
 		return
 	}
@@ -311,6 +330,23 @@ func InsertTradeList(trade *model.TradeList) error {
 
 func processTicker(message []byte) error {
 	logger.Println(string(message))
+	d := TickerResponse{}
+	if err := json.Unmarshal(message, &d); err != nil {
+		return err
+	}
+
+	for _, e := range d.Data {
+		key := fmt.Sprintf("coinbene:ticker:%s", e.Symbol)
+		tickerStr, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		ret, err := rclient.Set(key, tickerStr, time.Duration(10*60*time.Second)).Result()
+		if err != nil {
+			return err
+		}
+		logger.Println(ret)
+	}
 	return nil
 }
 
