@@ -4,6 +4,7 @@ go 1.13
 
 require (
 	github.com/go-pg/pg v8.0.7+incompatible
+	github.com/go-redis/redis v6.15.9+incompatible
 	github.com/gorilla/websocket v1.4.2
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e // indirect

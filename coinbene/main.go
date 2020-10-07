@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-pg/pg"
+	"github.com/go-redis/redis"
 	"github.com/gorilla/websocket"
 	"github.com/kxiaong/quant/coinbene/model"
 	"github.com/kxiaong/quant/util"
@@ -30,6 +31,12 @@ var (
 		User:     "coinbene",
 		Password: "xiaoxiao",
 		Database: "coinbene",
+	})
+
+	rclient = redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "",
+		DB:       0,
 	})
 
 	ApiKey    = "a13d876a61511b51c6dc5cb915ad7d02"
@@ -137,8 +144,14 @@ func main() {
 	defer dbconn.Close()
 
 	msg := CommandStruct{
-		Op:   "subscribe",
-		Args: []string{"usdt/kline.BTC-SWAP.1m"},
+		Op: "subscribe",
+		Args: []string{
+			"usdt/kline.BTC-SWAP.1h",
+			"usdt/kline.BTC-SWAP.1m",
+			"usdt/ticker.BTC-SWAP",
+			"usdt/orderBook.BTC-SWAP.100",
+			"usdt/tradeList.BTC-SWAP",
+		},
 	}
 
 	err := c.WriteJSON(msg)
@@ -152,18 +165,11 @@ func main() {
 		return
 	}
 
-	err = GetUserHolding(c)
-	//err = GetUserAccount(c)
-	if err != nil {
-		logger.Fatal(err)
-	}
-
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for {
 			_, message, err := c.ReadMessage()
-			logger.Println(string(message))
 			if err != nil {
 				logger.Println(err)
 				continue
@@ -199,13 +205,23 @@ func dispatch(message []byte) {
 
 	switch respBrief.Topic {
 	case "usdt/orderBook.BTC-SWAP":
-		err := processOrderBook(message)
-		if err != nil {
+		if err := processOrderBook(message); err != nil {
 			logger.Fatal(err)
 		}
 	case "usdt/kline.BTC-SWAP.1m":
-		err := processKline(message)
-		if err != nil {
+		if err := processKline(message, "1m"); err != nil {
+			logger.Fatal(err)
+		}
+	case "usdt/kline.BTC-SWAP.1h":
+		if err := processKline(message, "1h"); err != nil {
+			logger.Fatal(err)
+		}
+	case "usdt/ticker.BTC-SWAP":
+		if err := processTicker(message); err != nil {
+			logger.Fatal(err)
+		}
+	case "usdt/tradeList.BTC-SWAP":
+		if err := processTradeList(message); err != nil {
 			logger.Fatal(err)
 		}
 	default:
@@ -213,70 +229,18 @@ func dispatch(message []byte) {
 	}
 }
 
-func processKline(message []byte) error {
-	klineResp := KlineResponse{}
-	err := json.Unmarshal(message, &klineResp)
-	if err != nil {
-		return err
-	}
+func processTradeList(message []byte) error {
+	logger.Println(string(message))
+	return nil
+}
 
-	if klineResp.Action == "insert" {
-		var insertData []*model.Kline
-		for _, e := range klineResp.Data {
-			tmp := &model.Kline{
-				High:   e.KHigh,
-				Low:    e.KLow,
-				Open:   e.KOpen,
-				Close:  e.KClose,
-				Volume: e.KVolume,
-				Ts:     time.Unix(e.KTs, 0),
-			}
-			tmp.CreatedAt = time.Now()
-			tmp.UpdatedAt = time.Now()
-			insertData = append(insertData, tmp)
-		}
-
-		for _, i := range insertData {
-			_, err := dbconn.Model(i).Insert()
-			if err != nil {
-				logger.Fatal(err)
-				return err
-			}
-		}
-	} else {
-		logger.Println(string(message))
-		for _, e := range klineResp.Data {
-			logger.Println(e.KTs)
-			tmp := &model.Kline{
-				High:   e.KHigh,
-				Low:    e.KLow,
-				Open:   e.KOpen,
-				Close:  e.KClose,
-				Volume: e.KVolume,
-				Ts:     time.Unix(e.KTs, 0),
-			}
-			tmp.UpdatedAt = time.Now()
-
-			result, err := dbconn.Model(tmp).
-				Set("high = ?", tmp.High).
-				Set("low = ?", tmp.Low).
-				Set("open = ?", tmp.Open).
-				Set("close = ?", tmp.Close).
-				Set("Volume = ?", tmp.Volume).
-				Where("ts = ?", tmp.Ts).Update()
-
-			if err != nil {
-				return err
-			}
-
-			logger.Println("result: ", result)
-		}
-	}
-
+func processTicker(message []byte) error {
+	logger.Println(string(message))
 	return nil
 }
 
 func processOrderBook(message []byte) error {
+	logger.Println(string(message))
 	d := OrderBookResponse{}
 	err := json.Unmarshal(message, &d)
 	if err != nil {
@@ -284,19 +248,121 @@ func processOrderBook(message []byte) error {
 		return err
 	}
 
-	for _, e := range d.Data {
-		logger.Println(e.Version)
-		logger.Println(e.Timestamp)
-		logger.Println("bids ===>")
-		for _, b := range e.Bids {
-			logger.Println(b)
+	/*
+	 *    for _, e := range d.Data {
+	 *        logger.Println(e.Version)
+	 *        logger.Println(e.Timestamp)
+	 *        logger.Println("bids ===>")
+	 *        for _, b := range e.Bids {
+	 *            logger.Println(b)
+	 *        }
+	 *        logger.Println("asks ===>")
+	 *        for _, a := range e.Asks {
+	 *            logger.Println(a)
+	 *        }
+	 *    }
+	 */
+	return nil
+}
+
+func processKline(message []byte, gap string) error {
+	klineResp := KlineResponse{}
+	err := json.Unmarshal(message, &klineResp)
+	if err != nil {
+		logger.Fatal(err)
+		return err
+	}
+
+	if klineResp.Action == "insert" {
+		latest, err := GetLatestKlineTs(gap)
+		if err != nil {
+			return err
 		}
-		logger.Println("asks ===>")
-		for _, a := range e.Asks {
-			logger.Println(a)
+
+		var insertData []*model.Kline
+		for _, e := range klineResp.Data {
+			if e.KTs <= latest.Unix() {
+				continue
+			}
+			tmp := &model.Kline{
+				High:   e.KHigh,
+				Low:    e.KLow,
+				Open:   e.KOpen,
+				Close:  e.KClose,
+				Volume: e.KVolume,
+				Gap:    gap,
+				Ts:     time.Unix(e.KTs, 0),
+			}
+			insertData = append(insertData, tmp)
+		}
+
+		for _, i := range insertData {
+			err := InsertKline(i)
+			if err != nil {
+				return err
+			}
+		}
+	} else {
+		for _, e := range klineResp.Data {
+			tmp := &model.Kline{
+				High:   e.KHigh,
+				Low:    e.KLow,
+				Open:   e.KOpen,
+				Close:  e.KClose,
+				Volume: e.KVolume,
+				Gap:    gap,
+				Ts:     time.Unix(e.KTs, 0),
+			}
+
+			affected, err := UpdateKline(tmp)
+			if err != nil {
+				return err
+			}
+			if affected == 0 {
+				return InsertKline(tmp)
+			}
 		}
 	}
 	return nil
+}
+
+func GetLatestKlineTs(gap string) (*time.Time, error) {
+	var p time.Time
+	err := dbconn.Model(&model.Kline{}).
+		Column("ts").
+		Where("gap = ?", gap).
+		Order("ts desc").Limit(1).Select(&p)
+	return &p, err
+}
+
+func InsertKline(kline *model.Kline) error {
+	kline.CreatedAt = time.Now()
+	kline.UpdatedAt = time.Now()
+	_, err := dbconn.Model(kline).Insert()
+	if err != nil {
+		logger.Fatal(err)
+		return err
+	}
+	return nil
+}
+
+func UpdateKline(kline *model.Kline) (int, error) {
+	kline.UpdatedAt = time.Now()
+	result, err := dbconn.Model(&model.Kline{}).
+		Set("high = ?", kline.High).
+		Set("low = ?", kline.Low).
+		Set("close = ?", kline.Close).
+		Set("volume = ?", kline.Volume).
+		Set("updated_at = ?", kline.UpdatedAt).
+		Where("ts = ?", kline.Ts).
+		Where("gap = ?", kline.Gap).
+		Update()
+
+	if err != nil {
+		return 0, err
+	}
+
+	return result.RowsAffected(), nil
 }
 
 func login(c *websocket.Conn) error {
@@ -350,18 +416,6 @@ func GetUserAccount(c *websocket.Conn) error {
 	if err != nil {
 		logger.Fatalf("Get user account failed: %v", err)
 		return err
-	}
-	return nil
-}
-
-func GetUserHolding(c *websocket.Conn) error {
-	command := CommandStruct{
-		Op:   "subscribe",
-		Args: []string{"usdt/user.position"},
-	}
-	err := c.WriteJSON(command)
-	if err != nil {
-		logger.Println(err)
 	}
 	return nil
 }

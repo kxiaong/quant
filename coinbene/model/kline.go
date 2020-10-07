@@ -11,5 +11,6 @@ type Kline struct {
 	Open      float64   `sql:"open"`
 	Close     float64   `sql:"close"`
 	Volume    float64   `sql:"volume"`
+	Gap       string    `sql:"gap"`
 	Ts        time.Time `sql:"ts"`
 }
